@@ -1,14 +1,15 @@
 Introduction
 ------------
 
-srandom is a Linux kernel module that can be used to replace the built-in /dev/urandom & /dev/random device files.  It is secure and VERY fast.   My tests show it over 150x faster then /dev/urandom.   It should compile and install on any Linux 3.10+ kernel.  It passes all the randomness tests using the dieharder tests.
+srandom is a Linux kernel module that can be used to replace the built-in /dev/urandom & /dev/random device files.  It is secure and VERY fast.   My tests show it can be over 150x faster then /dev/urandom.   It should compile and install on any Linux 3.10+ kernel.  It passes all the randomness tests using the dieharder tests.
 
-srandom was created as an improvement to the built-in random number generators.  I wanted a much faster random number generator to wipe ssd disks.  Through many hours of testing and trial-and-error, I came up with an algorithm that is many times faster than urandom, but still produces excellent random numbers.  You can wipe multiple SSDs at the same time.   The built-in generators (/dev/random and /dev/urandom) are technically not flawed.  /dev/random (the true random number generator) is BLOCKED most of the time waiting for more entropy.  If you are running your Linux in a VM, /dev/random is basically unusable.  /dev/urandom is unblocked, but still very slow.
+srandom was created as a performance improvement to the built-in PRNG /dev/urandom number generator.  I wanted a much faster random number generator to wipe ssd disks.  Through many hours of testing, I came up with an algorithm that is many times faster than urandom, but still produces excellent random numbers that is indistinguishable from true random numbers.  You can wipe multiple SSDs at the same time.
 
+The built-in generators (/dev/random and /dev/urandom) are technically not flawed.  /dev/random (the true random number generator) is BLOCKED most of the time waiting for more entropy makeing it basically unusable.  The PRNG /dev/urandom is unblocked, but is very slow when compared to srandom. 
 
-What is the most important part of random numbers?  Unpredictability!
+What is the most important part of random numbers?  Unpredictability!  Generating random numbers which is indistinguishable from true randomness is the goal here...   There are MANY arguments against using a PRNG and some will even argue that true randomness doesn't exist.   Personally, I don't get the point.  
 
-srandom includes all these features to make it's generator produce the most unpredictable/random numbers.
+What makes srandom a great PRNG generator?  It includes all these features to make it's generator produce the most unpredictable/random numbers.
   * It uses two separate and different 64bit PRNGs.
   * There are two different algorithms to XOR the the 64bit PSRNGs together.
   * srandom seeds and re-seeds the three separate seeds using nano timer.
@@ -23,7 +24,7 @@ The best part of srandom is it's efficiency and very high speed...  I tested man
 Why do I need this?
 -------------------
 
-The best use-case is disk wiping.  However you could use srandom to provide your applications with the fastest and unpredictable source of random numbers.  Why would you want to block your applications while waiting for random numbers?  Run "lsof|grep random", just to see how many applications have the random number device open...  Any security type applications rely heavily on random numbers.  For example, Apache SSL (Secure Socket Level), PGP (Pretty Good Privacy), VPN (Virtual Private Networks).  All types of Encryption, Password seeds, Tokens would rely on a source of random number.  There is many examples at https://www.random.org/testimonials/.
+The best use-case is disk wiping.  However you could use srandom to provide your applications with the fastest source of random numbers.  Why would you want to block your applications while waiting for random numbers?  Run "lsof|grep random", just to see how many applications have the random number device open...  Any security type applications rely heavily on random numbers.  For example, Apache SSL (Secure Socket Level), PGP (Pretty Good Privacy), VPN (Virtual Private Networks).  All types of Encryption, Password seeds, Tokens would rely on a source of random number.  There is many examples at https://www.random.org/testimonials/.
 
 Compile and installation
 ------------------------
@@ -61,7 +62,7 @@ You can load the kernel module temporary, or you can install the kernel module t
 # cat /proc/srandom
 -----------------------:----------------------
 Device                 : /dev/srandom
-Module version         : 1.33
+Module version         : 1.40.1
 Current open count     : 5
 Total open count       : 3665
 Total K bytes          : 55146567
@@ -127,7 +128,7 @@ sys     4m37.923s
 
 
 
-The "Blocking" random number generator.  ( I pressed [CTRL-C] after 5 minutes and got 35 bytes!  If you really NEED to test this, You might need to leave this running for days....)
+The "Blocking" random number generator.  ( I pressed [CTRL-C] after 5 minutes and got 35 bytes!)  If you really NEED true random numbers, you would need to purchase a true random number device.)
 
 ```
 time dd if=/dev/random of=/dev/null count=64k bs=64k
@@ -145,9 +146,9 @@ sys     0m0.003s
 Testing randomness
 ------------------
 
-The most important part of the random number device file is that is produces random/unpredictable numbers.  The golden standard of testing randomness is the dieharder test suite (http://www.phy.duke.edu/~rgb/General/dieharder.php).  The dieharder tool with easily detect flawed random number generators.   After you install dieharder, use the following command to put /dev/srandom through the battery of tests.
+The most important part of the random number device file is that is produces random/unpredictable numbers.  The golden standard of testing randomness is the dieharder test suite (http://www.phy.duke.edu/~rgb/General/dieharder.php).  The dieharder tool will easily detect flawed random number generators.   After you install dieharder, use the following command to put /dev/srandom through the battery of tests.
 
-Just a note about some tests assessments that can randomly show as "WEAK"...  If the test is repeatedly "FAILED" or "WEAK",then that is a problem.  So, please retest a few times to verify if it passes.
+A note about the possibility of a test showing as "WEAK"...  If a test is repeatedly "FAILED" or "WEAK", then that is a problem.   
 
 
 ```

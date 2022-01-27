@@ -85,7 +85,7 @@ case "$1" in
       if is_linked >/dev/null; then
         echo "/dev/urandom is LINKED to /dev/srandom (system is using srandom)"
       else
-        echo "/dev/urandom is NOT LINKED to /dev/srandom (using system RND generator)"
+        echo "/dev/urandom is NOT LINKED to /dev/srandom (system is using built-in generator)"
       fi
       cat /proc/srandom
     fi
