@@ -15,12 +15,20 @@
 
 #define DRIVER_AUTHOR "Jonathan Senkerik <josenk@jintegrate.co>"
 #define DRIVER_DESC   "Improved random number generator."
-#define rndArraySize 67             /* Size of Array.  Must be >= 64. (actual size used will be 64, anything greater is thrown away). Recommended prime.*/
-#define numberOfRndArrays  16       /* Number of 512b Array (Must be power of 2) */
+#define ULTRA_HIGH_SPEED_MODE 0     /* Set to 1 to enable Ultra High Speed Mode, which could be considered less random, but still passes dieharder */
 #define SDEVICE_NAME "srandom"      /* Dev name as it appears in /proc/devices */
-#define APP_VERSION "1.40.0"
-#define THREAD_SLEEP_VALUE 11       /* Amount of time the background thread should sleep between each operation. Recommended prime */
+#define APP_VERSION "1.41.0"
+#define THREAD_SLEEP_VALUE 11       /* Amount of time in seconds, the background thread should sleep between each operation. Recommended prime */
 #define PAID 0
+
+#if ULTRA_HIGH_SPEED_MODE
+    #define rndArraySize 65             /* Size of Array.  Must be >= 65. (actual size used will be 65, anything greater is thrown away).*/
+    #define numberOfRndArrays  32       /* Number of 512b Array (Must be power of 2) */
+#else
+    #define rndArraySize 67             /* Size of Array.  Must be >= 65. (actual size used will be 65, anything greater is thrown away). Recommended prime.*/
+    #define numberOfRndArrays  16       /* Number of 512b Array (Must be power of 2) */
+#endif
+
 
 //#define DEBUG_CONNECTIONS 0
 //#define DEBUG_READ 0
@@ -56,7 +64,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 /*
@@ -70,12 +78,17 @@ static uint64_t xorshft64(void);
 static uint64_t xorshft128(void);
 static int nextbuffer(void);
 static void update_sarray(int);
+#if ULTRA_HIGH_SPEED_MODE
+static void update_sarray_uhs(int);
+#endif
 static void seed_PRND_s0(void);
 static void seed_PRND_s1(void);
 static void seed_PRND_x(void);
 static int proc_read(struct seq_file *m, void *v);
 static int proc_open(struct inode *inode, struct  file *file);
+#if ! ULTRA_HIGH_SPEED_MODE
 static int work_thread(void *data);
+#endif
 
 
 /*
@@ -119,8 +132,9 @@ static struct mutex Open_mutex;
 static struct mutex ArrBusy_mutex;
 static struct mutex UpPos_mutex;
 
+#if ! ULTRA_HIGH_SPEED_MODE
 static struct task_struct *kthread;
-
+#endif
 
 /*
  * Global variables
@@ -191,8 +205,8 @@ int mod_init(void)
         }
         printk(KERN_INFO "-----------------------:----------------------\n");
         printk(KERN_INFO "Author                 : Jonathan Senkerik\n");
-        printk(KERN_INFO "Website                : http://www.jintegrate.co\n");
-        printk(KERN_INFO "github                 : http://github.com/josenk/srandom\n");
+        printk(KERN_INFO "Website                : https://www.jintegrate.co\n");
+        printk(KERN_INFO "github                 : https://github.com/josenk/srandom\n");
         if (PAID == 0) {
                 printk(KERN_INFO "Paypal                 : josenk@jintegrate.co\n");
                 printk(KERN_INFO "Bitcoin                : 1MTNg7SqcEWs5uwLKwNiAfYqBfnKFJu65p\n");
@@ -223,8 +237,10 @@ int mod_init(void)
                 update_sarray(arraysPosition);
         }
 
-        kthread = kthread_create(work_thread, NULL, "mykthread");
-        wake_up_process(kthread);
+        #if ! ULTRA_HIGH_SPEED_MODE
+                kthread = kthread_create(work_thread, NULL, "mykthread");
+                wake_up_process(kthread);
+        #endif
 
         return 0;
 }
@@ -234,7 +250,9 @@ int mod_init(void)
  */
 void mod_exit(void)
 {
-        kthread_stop(kthread);
+        #if ! ULTRA_HIGH_SPEED_MODE
+                kthread_stop(kthread);
+        #endif
 
         misc_deregister(&srandom_dev);
 
@@ -321,7 +339,7 @@ static ssize_t sdevice_read(struct file * file, char * buf, size_t requestedCoun
                         arraysPosition = 0;
                 }
         }
-    
+
         /*
          * Mark the Arry as busy by setting the flag
          */
@@ -339,7 +357,11 @@ static ssize_t sdevice_read(struct file * file, char * buf, size_t requestedCoun
                 #endif
 
                 memcpy(new_buf + (Block * 512), prngArrays[arraysPosition], 512);
-                update_sarray(arraysPosition);
+                #if ULTRA_HIGH_SPEED_MODE
+                        update_sarray_uhs(arraysPosition);
+                #else
+                        update_sarray(arraysPosition);
+                #endif
 
         }
 
@@ -347,7 +369,7 @@ static ssize_t sdevice_read(struct file * file, char * buf, size_t requestedCoun
          * Send new_buf to device
          */
         ret = COPY_TO_USER(buf, new_buf, requestedCount);
-        
+
         /*
          * Free allocated memory
          */
@@ -356,7 +378,7 @@ static ssize_t sdevice_read(struct file * file, char * buf, size_t requestedCoun
         } else {
                 kfree(new_buf);
         }
-             
+
 
         /*
          * Clear ArraysBusyFlags
@@ -366,7 +388,7 @@ static ssize_t sdevice_read(struct file * file, char * buf, size_t requestedCoun
         ArraysBusyFlags -= (1 << arraysPosition);
         mutex_unlock(&ArrBusy_mutex);
 
-        
+
 
         /*
          * return how many chars we sent
@@ -463,6 +485,55 @@ void update_sarray(int arraysPosition)
 
         #ifdef DEBUG_UPDATE_ARRAYS
         printk(KERN_INFO "[srandom] update_sarray arraysPosition:%d, X:%llu, Y:%llu, Z1:%llu, Z2:%llu, Z3:%llu,\n", arraysPosition, X, Y, Z1, Z2, Z3);
+        #endif
+}
+
+/*
+ * Update the sarray with new random numbers.  Ultra High speed mode
+ */
+void update_sarray_uhs(int arraysPosition)
+{
+        int16_t C;
+        int64_t X, Z1;
+
+        /*
+         * This function must run exclusivly
+         */
+        while (mutex_lock_interruptible(&UpArr_mutex));
+
+        generatedCount++;
+
+        Z1 = xorshft64();
+        if ((Z1 & 1) == 0) {
+                #ifdef DEBUG_UPDATE_ARRAYS
+                printk(KERN_INFO "[srandom] update_sarray_uhs 0\n");
+                #endif
+
+                for (C = 0;C < (rndArraySize -4) ;C = C + 4) {
+                        X=xorshft64();
+                        prngArrays[arraysPosition][C]     = prngArrays[arraysPosition][C + 1] ^ X;
+                        prngArrays[arraysPosition][C + 1] = prngArrays[arraysPosition][C + 2] ^ X ^ Z1;
+                        prngArrays[arraysPosition][C + 2] = prngArrays[arraysPosition][C + 3] ^ X ^ Z1;
+                        prngArrays[arraysPosition][C + 3] = X ^ Z1;
+                }
+        } else {
+                #ifdef DEBUG_UPDATE_ARRAYS
+                printk(KERN_INFO "[srandom] update_sarray_uhs 1\n");
+                #endif
+
+                for (C = 0;C < (rndArraySize -4) ;C = C + 4) {
+                        X=xorshft64();
+                        prngArrays[arraysPosition][C]     = prngArrays[arraysPosition][C + 1] ^ X ^ Z1;
+                        prngArrays[arraysPosition][C + 1] = prngArrays[arraysPosition][C + 2] ^ X;
+                        prngArrays[arraysPosition][C + 2] = prngArrays[arraysPosition][C + 3] ^ X ^ Z1;
+                        prngArrays[arraysPosition][C + 3] = X ^ Z1;
+                }
+        }
+
+        mutex_unlock(&UpArr_mutex);
+
+        #ifdef DEBUG_UPDATE_ARRAYS
+        printk(KERN_INFO "[srandom] update_sarray_uhs arraysPosition:%d, X:%llu, Z1:%llu\n", arraysPosition, X, Z1);
         #endif
 
 }
@@ -586,7 +657,11 @@ int proc_read(struct seq_file *m, void *v)
 {
         seq_printf(m, "-----------------------:----------------------\n");
         seq_printf(m, "Device                 : /dev/"SDEVICE_NAME"\n");
-        seq_printf(m, "Module version         : "APP_VERSION"\n");
+	#if ULTRA_HIGH_SPEED_MODE
+                seq_printf(m, "Module version         : "APP_VERSION"  UHS Mode\n");
+	#else
+                seq_printf(m, "Module version         : "APP_VERSION"\n");
+	#endif
         seq_printf(m, "Current open count     : %d\n",sdevOpenCurrent);
         seq_printf(m, "Total open count       : %d\n",sdevOpenTotal);
         seq_printf(m, "Total K bytes          : %llu\n",generatedCount / 2);
@@ -598,8 +673,8 @@ int proc_read(struct seq_file *m, void *v)
         }
         seq_printf(m, "-----------------------:----------------------\n");
         seq_printf(m, "Author                 : Jonathan Senkerik\n");
-        seq_printf(m, "Website                : http://www.jintegrate.co\n");
-        seq_printf(m, "github                 : http://github.com/josenk/srandom\n");
+        seq_printf(m, "Website                : https://www.jintegrate.co\n");
+        seq_printf(m, "github                 : https://github.com/josenk/srandom\n");
         if (PAID == 0) {
                 seq_printf(m, "Paypal                 : josenk@jintegrate.co\n");
                 seq_printf(m, "Bitcoin                : 1GEtkAm97DphwJbJTPyywv6NbqJKLMtDzA\n");
