@@ -238,7 +238,7 @@ int mod_init(void)
         }
 
         #if ! ULTRA_HIGH_SPEED_MODE
-                kthread = kthread_create(work_thread, NULL, "mykthread");
+                kthread = kthread_create(work_thread, NULL, "srandom-kthread");
                 wake_up_process(kthread);
         #endif
 
