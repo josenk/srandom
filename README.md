@@ -1,24 +1,28 @@
 Introduction
 ------------
 
-srandom is a Linux kernel module that can be used to replace the built-in /dev/urandom & /dev/random device files.  It is secure and VERY fast.   My tests show it can be over 150x faster then /dev/urandom.   It should compile and install on any Linux 3.10+ kernel.  It passes all the randomness tests using the dieharder tests.
+srandom is a Linux kernel module that can be used to replace the built-in /dev/urandom & /dev/random device files.  It is VERY fast and probably the most secure PRNG available that can replace the built-in /dev/urandom device.   My tests show it can be over 150x faster then /dev/urandom.   It should compile and install on any Linux 3.10+ kernel.  It passes all the randomness tests using the dieharder tests.
 
-srandom was created as a performance improvement to the built-in PRNG /dev/urandom number generator.  I wanted a much faster random number generator to wipe ssd disks.  Through many hours of testing, I came up with an algorithm that is many times faster than urandom, but still produces excellent random numbers that is indistinguishable from true random numbers.  You can wipe multiple SSDs at the same time.
+srandom was created as a performance improvement to the built-in PRNG /dev/urandom number generator.  I wanted a much faster random number generator to wipe ssd disks.  Through many hours of testing, I came up with an algorithm that is many times faster than urandom, but still produces excellent random numbers that dieharder finds it indistinguishable from true random numbers.  You can wipe multiple SSDs at the same time.
 
-The built-in generators (/dev/random and /dev/urandom) are technically not flawed.  /dev/random (the true random number generator) is BLOCKED most of the time waiting for more entropy makeing it basically unusable.  The PRNG /dev/urandom is unblocked, but is very slow when compared to srandom. 
+The built-in __PRNG__ generators (/dev/random and /dev/urandom) are technically not flawed.  It's just that they are very slow when compared to srandom.  YES, I said it...  __/dev/random and /dev/urandom are BOTH PRNG generators.__  So, ranting that srandom is flawed purely because it's PRNG is just ranting and ignorance.
+  > https://www.2uo.de/myths-about-urandom/
+  ```
+  Truth is, when state-of-the-art hash algorithms are broken, or when state-of-the-art block ciphers are broken, it doesn't matter that you get “philosophically insecure” random numbers because of them. You've got nothing left to securely use them for anyway.
+  ```
 
-What is the most important part of random numbers?  Unpredictability!  Generating random numbers which is indistinguishable from true randomness is the goal here...   There are MANY arguments against using a PRNG and some will even argue that true randomness doesn't exist.   Personally, I don't get the point.  
+Generating random numbers which is indistinguishable from true randomness is the goal here...   There are arguments against using a PRNG and some argue that true randomness doesn't exist.   Personally, I don't get the point???  The built-in /dev/random and /dev/urandom are BOTH PRNG generators.
 
 What makes srandom a great PRNG generator?  It includes all these features to make it's generator produce the most unpredictable/random numbers.
   * It uses two separate and different 64bit PRNGs.
-  * There are two different algorithms to XOR the the 64bit PSRNGs together.
+  * There are two different algorithms to XOR the the 64bit PRNGs together.
   * srandom seeds and re-seeds the three separate seeds using nano timer.
-  * The module seeds the PSRNGs twice on module init.
+  * The module seeds the PRNGs twice on module init.
   * It uses 16 x 512byte buffers and outputs them randomly.
   * There is a separate kernel thread that constantly updates the buffers and seeds.
   * srandom throws away a small amount of data.
 
-The best part of srandom is it's efficiency and very high speed...  I tested many PSRNGs and found two that worked very fast and had a good distribution of numbers.  Two or three 64bit numbers are XORed.  The results is unpredictable and very high speed generation of numbers.
+The best part of srandom is it's efficiency and very high speed...  I tested many PRNGs and found two that worked very fast and had a good distribution of numbers.  Two or three 64bit numbers are XORed.  The results is unpredictable and very high speed generation of numbers.
 
 
 Why do I need this?
@@ -113,11 +117,7 @@ time dd if=/dev/srandom of=/dev/null count=64k bs=64k
 real    0m1.811s
 user    0m0.012s
 sys     0m1.799s
-
-
 ```
-
-
 
 
 The "Non-Blocking" urandom number generator
@@ -133,22 +133,6 @@ real    4m37.961s
 user    0m0.028s
 sys     4m37.923s
 
-```
-
-
-
-The "Blocking" random number generator.  ( I pressed [CTRL-C] after 5 minutes and got 35 bytes!)  If you really NEED true random numbers, you would need to purchase a true random number device.)
-
-```
-time dd if=/dev/random of=/dev/null count=64k bs=64k
-[CTRL]-C
-0+35 records in
-0+0 records out
-0 bytes (0 B) copied, 325.303 s, 0.0 kB/s
-
-real    5m25.306s
-user    0m0.001s
-sys     0m0.003s
 ```
 
 
@@ -198,6 +182,12 @@ diehard_count_1s_byt|   0|    256000|     100|0.18753110|  PASSED
 ```
 
 
+The challenge
+-------------
+  >  https://github.com/josenk/srandom/releases/tag/1.37
+
+  If that's not enough data, just run the dd commands yourself...   For each block generate whatever amount of data you like.   Even 1TB of data if you like!  Then try to predict the final block.  Let me know your methods and results, I will be very happy to work with anyone with suspect results.
+
 
 How to configure your apps
 --------------------------
@@ -239,7 +229,7 @@ How to configure your apps
 
 
 
-Using /dev/srandom to securely wipe SSD disks.
+Using /dev/srandom to wipe all data from your SSD disks.
 -----------------------------------------------
 
 
