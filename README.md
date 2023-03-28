@@ -1,3 +1,9 @@
+WARNING: v1.x is not qualified for cryptographical solutions
+------------------------------------------------------------
+srandom v1.x has a known weakness that makes it unqualified for cryptographical solutions.  I will review the attack and I should be able to release a new v2.0 in the near future.  Instructions are provided below to remove srandom (which may require a reboot).
+
+
+
 Introduction
 ------------
 
