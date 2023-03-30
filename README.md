@@ -1,40 +1,29 @@
-WARNING: v1.x is not qualified for cryptographical solutions
-------------------------------------------------------------
-srandom v1.x has a known weakness that makes it unqualified for cryptographical solutions.  I will review the attack and I should be able to release a new v2.0 in the near future.  Instructions are provided below to remove srandom (which may require a reboot).
-
-
-
 Introduction
 ------------
 
-srandom is a Linux kernel module that can be used to replace the built-in /dev/urandom & /dev/random device files.  It is VERY fast and probably the most secure PRNG available that can replace the built-in /dev/urandom device.   My tests show it can be over 150x faster then /dev/urandom.   It should compile and install on any Linux 3.10+ kernel.  It passes all the randomness tests using the dieharder tests.
+srandom is a Linux kernel module that can be used like the built-in /dev/urandom & /dev/random device files.  In the standard mode (ChaCha8) it is faster and should be secure enough for crypto.   My tests show it can be over todox faster then /dev/urandom.  The Ultra High Speed mode uses an XorShift PRNG which is considered insufficiant for crypto.  It should compile and install on any Linux 3.17+ kernel.  Both ChaCha8 and (UHS)XorShift both passes all the randomness tests using the dieharder tests.
 
 srandom was created as a performance improvement to the built-in PRNG /dev/urandom number generator.  I wanted a much faster random number generator to wipe ssd disks.  Through many hours of testing, I came up with an algorithm that is many times faster than urandom, but still produces excellent random numbers that dieharder finds it indistinguishable from true random numbers.  You can wipe multiple SSDs at the same time.
 
-The built-in __PRNG__ generators (/dev/random and /dev/urandom) are technically not flawed.  It's just that they are very slow when compared to srandom.  YES, I said it...  __/dev/random and /dev/urandom are BOTH PRNG generators.__  So, ranting that srandom is flawed purely because it's PRNG is just ranting and ignorance.
+The built-in __PRNG__ generators (/dev/random and /dev/urandom) are technically not flawed.  It's just that they are very slow when compared to srandom.  __/dev/random and /dev/urandom are BOTH PRNG generators.__  
   > https://www.2uo.de/myths-about-urandom/
   ```
   Truth is, when state-of-the-art hash algorithms are broken, or when state-of-the-art block ciphers are broken, it doesn't matter that you get “philosophically insecure” random numbers because of them. You've got nothing left to securely use them for anyway.
   ```
 
-Generating random numbers which is indistinguishable from true randomness is the goal here...   There are arguments against using a PRNG and some argue that true randomness doesn't exist.   Personally, I don't get the point???  The built-in /dev/random and /dev/urandom are BOTH PRNG generators.
-
 What makes srandom a great PRNG generator?  It includes all these features to make it's generator produce the most unpredictable/random numbers.
-  * It uses two separate and different 64bit PRNGs.
-  * There are two different algorithms to XOR the the 64bit PRNGs together.
-  * srandom seeds and re-seeds the three separate seeds using nano timer.
-  * The module seeds the PRNGs twice on module init.
-  * It uses 16 x 512byte buffers and outputs them randomly.
-  * There is a separate kernel thread that constantly updates the buffers and seeds.
-  * srandom throws away a small amount of data.
+  * It's configurable to use ChaCha8 or UHS(XorShift) depending on your use-case.
+  * UHS mode uses two separate and different 64bit PRNGs and shuffles the results.
+  * It uses 64 x 512byte buffers and outputs them randomly.
 
-The best part of srandom is it's efficiency and very high speed...  I tested many PRNGs and found two that worked very fast and had a good distribution of numbers.  Two or three 64bit numbers are XORed.  The results is unpredictable and very high speed generation of numbers.
 
 
 Why do I need this?
 -------------------
 
-The best use-case is disk wiping.  However you could use srandom to provide your applications with the fastest source of random numbers.  Why would you want to block your applications while waiting for random numbers?  Run "lsof|grep random", just to see how many applications have the random number device open...  Any security type applications rely heavily on random numbers.  For example, Apache SSL (Secure Socket Level), PGP (Pretty Good Privacy), VPN (Virtual Private Networks).  All types of Encryption, Password seeds, Tokens would rely on a source of random number.  There is many examples at https://www.random.org/testimonials/.
+ * Use standard mode (ChaCha8) for any security type applications that rely heavily on random numbers.  For example, Apache SSL (Secure Socket Level), PGP (Pretty Good Privacy), VPN (Virtual Private Networks).  All types of Encryption, Password seeds, Tokens would rely on a source of random numbers.  There is many examples at https://www.random.org/testimonials/.
+
+ * The best use-case for UHS(XorShift) is disk wiping or any application that does not involve crypto.
 
 Compile and installation
 ------------------------
@@ -63,7 +52,7 @@ To uninstall the kernel module from your system.
 Ultra High Speed Mode
 ---------------------
 
-Release 1.41+ now includes an Ultra High Speed Mode.  This mode uses the faster of the two 64bit PRNGs, more buffers, disables the background thread and other tweaks to get more performance.  This mode performs much faster, but still passes dieharder tests.  To enable this mode, simply modify the following line in the source code before running make.
+This mode uses the two 64bit XorShift PRNGs.  This mode performs much faster than ChaCha8, but still passes dieharder tests.  To enable this mode, simply modify the following line in the source code before running make.
 ```
 #define ULTRA_HIGH_SPEED_MODE 1
 ```
@@ -188,17 +177,11 @@ diehard_count_1s_byt|   0|    256000|     100|0.18753110|  PASSED
 ```
 
 
-The challenge
--------------
-  >  https://github.com/josenk/srandom/releases/tag/1.37
-
-  If that's not enough data, just run the dd commands yourself...   For each block generate whatever amount of data you like.   Even 1TB of data if you like!  Then try to predict the final block.  Let me know your methods and results, I will be very happy to work with anyone with suspect results.
-
 
 How to configure your apps
 --------------------------
 
-  If you installed the kernel module to load on reboot, then you do not need to modify any applications to use the srandom kernel module.   It will be linked to /dev/urandom, so all applications will use it automatically.   However, if you do not want to link /dev/srandom to /dev/urandom, then you can configure your applications to use whichever device you want.   Here is a few examples....
+  If you installed the kernel module to load on reboot, then you do not need to modify any applications to use the srandom kernel module.   It will be linked to /dev/urandom, so all applications will use it automatically.   However, if you do not want to link /dev/srandom to /dev/urandom, then you can configure your applications to use which ever device you want.   Here is a few examples....
 
   Java:  Use the following command line argument to tell Java to use the new random device
 
