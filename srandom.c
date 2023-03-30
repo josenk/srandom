@@ -11,14 +11,17 @@
 #include <linux/seq_file.h>         /* For seq_print */
 #include <linux/mutex.h>
 #include <linux/delay.h>
+#include <linux/kthread.h>
+#include "chacha.h"                 /* For chacha */
 
 #define DRIVER_AUTHOR "Jonathan Senkerik <josenk@jintegrate.co>"
 #define DRIVER_DESC   "Improved random number generator."
-#define ULTRA_HIGH_SPEED_MODE 1     /* Set to 1 to enable Ultra High Speed Mode (XorShift, which could be considered less random, but still passes dieharder */
+#define ULTRA_HIGH_SPEED_MODE 0     /* Set to 1 to enable Ultra High Speed Mode (XorShift, which could be considered less random, but still passes dieharder */
 #define SDEVICE_NAME "srandom"      /* Dev name as it appears in /proc/devices */
 #define APP_VERSION "2.0.0"
 #define numberOfRndArrays  64       /* Number of 512b Array. do not change */
 #define rndArraySize 72             /* Size of Array.  Must be >= 65. */
+#define THREAD_SLEEP_VALUE 601      /* Amount of time in seconds, the background thread should sleep between each operation. */
 #define PAID 0
 
 
@@ -27,6 +30,8 @@
 //#define DEBUG_WRITE 0
 //#define DEBUG_UPDATE_ARRAYS 0
 //#define DEBUG_SHUFFLE 0
+//#define DEBUG_THREAD 0
+//#define DEBUG_CHACHA 0
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
     #define COPY_TO_USER raw_copy_to_user
@@ -67,6 +72,7 @@ static uint8_t get_next_buffer(void);
 static int proc_read(struct seq_file *m, void *v);
 static int proc_open(struct inode *inode, struct  file *file);
 static void shuffle_sarray(int buffer_id);
+static int work_thread(void *data);
 
 
 /*
@@ -108,6 +114,8 @@ static const struct file_operations proc_fops = {
 static struct mutex UpArr_mutex;
 static struct mutex Open_mutex;
 static struct mutex ArrBusy_mutex;
+static struct chacha20_context ctx;
+static struct task_struct *kthread;
 
 
 /*
@@ -116,6 +124,9 @@ static struct mutex ArrBusy_mutex;
 uint64_t wyhash64_x;                      /* x for wyhash64 */
 uint64_t wyhash64_x2;                     /* x for wyhash64 in-module use only */
 uint64_t s[2];                            /* s for xoroshiro256** */
+uint8_t chacha_key[32];
+uint8_t chacha_nonce[12];
+uint64_t chacha_counter =0;
 uint64_t (*prngArrays)[rndArraySize];     /* Array of Array of SECURE RND numbers */
 int8_t ArraysBusyFlags[rndArraySize];     /* Binary Flags for Busy Arrays */
 
@@ -184,6 +195,7 @@ int mod_init(void)
                 prngArrays = kmalloc((numberOfRndArrays + 1) * rndArraySize * sizeof(uint64_t), GFP_KERNEL);
         }
 
+        //  Seed everything
         get_random_bytes(&wyhash64_x, sizeof(uint64_t));
         get_random_bytes(&wyhash64_x2, sizeof(uint64_t));
         get_random_bytes(&s[0], sizeof(uint64_t));
@@ -191,17 +203,20 @@ int mod_init(void)
         get_random_bytes(&s[2], sizeof(uint64_t));
         get_random_bytes(&s[3], sizeof(uint64_t));
 
+        chacha20_init_context(&ctx, chacha_key, chacha_nonce, chacha_counter);
 
         /*
          * Init the sarray
          */
-        
         for (buffer_id = 0;buffer_id <= numberOfRndArrays ;buffer_id++) {
                 for (C = 0;C <= rndArraySize;C++) {
                         prngArrays[buffer_id][C] = wyhash64() ^ xoroshiro256();
                 }
                 update_sarray(buffer_id);
         }
+
+        kthread = kthread_create(work_thread, NULL, "srandom-kthread");
+        wake_up_process(kthread);
 
         return 0;
 }
@@ -211,6 +226,8 @@ int mod_init(void)
  */
 void mod_exit(void)
 {
+        kthread_stop(kthread);
+
         misc_deregister(&srandom_dev);
 
         remove_proc_entry("srandom", NULL);
@@ -284,17 +301,21 @@ static ssize_t sdevice_read(struct file * file, char * buf, size_t requestedCoun
 
         for (Block = 0; Block <= (requestedCount / 512); Block++) {
                 buffer_id = get_next_buffer();
+                generatedCount++;
 
                 /*
-                 * Send the Array of RND to USER
+                 * Fill new_buf from a prngArrays block until requestedCount is met.
                  */
                 #ifdef DEBUG_READ
                 printk(KERN_INFO "[srandom] Block:%u buffer_id:%d\n", Block, buffer_id);
                 #endif
 
                 memcpy(new_buf + (Block * 512), prngArrays[buffer_id], 512);
-
+                
+                #if ULTRA_HIGH_SPEED_MODE
+                // UHS mode will update the prngArrays block with new values for next request.
                 update_sarray(buffer_id);
+                #endif
 
                 /*
                  * Clear ArraysBusyFlags
@@ -304,6 +325,16 @@ static ssize_t sdevice_read(struct file * file, char * buf, size_t requestedCoun
                 ArraysBusyFlags[buffer_id] = 0;
                 mutex_unlock(&ArrBusy_mutex);
         }
+
+        //  Use Chacha to cipher new_buf
+        #if ! ULTRA_HIGH_SPEED_MODE
+        //printk(KERN_INFO "[srandom] preChaCha 0:%d last:%d\n", (uint8_t)new_buf[0], (uint8_t)new_buf[sizeof(new_buf) -1]);
+
+        chacha20_xor(&ctx, new_buf, requestedCount);
+        chacha_counter += requestedCount;
+
+        //printk(KERN_INFO "[srandom] postChaCha 0:%d last:%d\n", (uint8_t)new_buf[0], (uint8_t)new_buf[sizeof(new_buf) -1]);
+        #endif
 
         /*
          * Send new_buf to device
@@ -386,11 +417,7 @@ uint8_t get_next_buffer(void) {
 }
 
 
-/*
- * Update the sarray with new random numbers
- */
-void update_sarray(int buffer_id)
-{
+void update_sarray(int buffer_id) {
         int16_t C;
         int64_t X[2], Z[2], temp;
         int8_t mixer;
@@ -401,7 +428,7 @@ void update_sarray(int buffer_id)
         } else {
                 Z[0] = xoroshiro256();
         }
-        
+
         if ((mixer & 2) == 2) {
                 Z[1] = wyhash64();
         } else {
@@ -412,8 +439,6 @@ void update_sarray(int buffer_id)
          * This must run exclusivly
          */
         while (mutex_lock_interruptible(&UpArr_mutex));
-
-        generatedCount++;
 
         for (C = 0; C < (rndArraySize -4); C = C + 4) {
                 mixer = (uint8_t)wyhash64_2();
@@ -449,7 +474,7 @@ void shuffle_sarray(int buffer_id)
         #ifdef DEBUG_SHUFFLE
         printk(KERN_INFO "[srandom] shuffle_sarray istart: %d, increment: %d, buffer_id:%d, first:%llu, last:%llu\n", istart, increment, buffer_id, prngArrays[buffer_id][0], prngArrays[buffer_id][rndArraySize-1]);
         #endif
-        
+
         for(int i = istart; i<rndArraySize/2; i = i + increment){
                 temp = prngArrays[buffer_id][i];
                 prngArrays[buffer_id][i] = prngArrays[buffer_id][rndArraySize-i-1];
@@ -512,6 +537,34 @@ inline uint64_t rotl(const uint64_t x, int k) {
         return (x << k) | (x >> (64 - k));
 }
 
+/*
+ *  The Kernel thread refreshing the arrays.
+ */
+int work_thread(void *data)
+{
+        int buffer_id = 0;
+
+        while (!kthread_should_stop()) {
+
+                msleep_interruptible(THREAD_SLEEP_VALUE * 1000);
+                
+                buffer_id ++;
+                if (buffer_id == numberOfRndArrays) {
+                        buffer_id = 0;
+                }
+
+                update_sarray(buffer_id);
+
+                #ifdef DEBUG_THREAD
+                printk(KERN_INFO "[srandom] work_thread buffer_id:%d\n", buffer_id);
+                #endif
+
+        }
+
+        return 0;
+ }
+
+
 
 /*
  * This function is called when reading /proc filesystem
@@ -520,11 +573,11 @@ int proc_read(struct seq_file *m, void *v)
 {
         seq_printf(m, "-----------------------:----------------------\n");
         seq_printf(m, "Device                 : /dev/"SDEVICE_NAME"\n");
-	#if ULTRA_HIGH_SPEED_MODE
+        #if ULTRA_HIGH_SPEED_MODE
                 seq_printf(m, "Module version         : "APP_VERSION" UHS (XorShift)\n");
-	#else
+        #else
                 seq_printf(m, "Module version         : "APP_VERSION" ChaCha\n");
-	#endif
+        #endif
         seq_printf(m, "Current open count     : %d\n",sdevOpenCurrent);
         seq_printf(m, "Total open count       : %d\n",sdevOpenTotal);
         seq_printf(m, "Total K bytes          : %llu\n",generatedCount / 2);
@@ -553,6 +606,129 @@ int proc_open(struct inode *inode, struct  file *file)
 }
 
 
+/*
+ *  ChaCha
+ *  Adapted from: https://github.com/Ginurx/chacha20-c
+ */
+static uint32_t rotl32(uint32_t x, int n) 
+{
+        return (x << n) | (x >> (32 - n));
+}
+
+static uint32_t pack4(const uint8_t *a)
+{
+        uint32_t res = 0;
+        res |= (uint32_t)a[0] << 0 * 8;
+        res |= (uint32_t)a[1] << 1 * 8;
+        res |= (uint32_t)a[2] << 2 * 8;
+        res |= (uint32_t)a[3] << 3 * 8;
+        return res;
+}
+
+static void chacha20_init_block(struct chacha20_context *ctx, uint8_t key[], uint8_t nonce[])
+{
+        const uint8_t *magic_constant = (uint8_t*)"expand 32-byte k";
+
+        memcpy(ctx->key, key, sizeof(ctx->key));
+        memcpy(ctx->nonce, nonce, sizeof(ctx->nonce));
+
+        ctx->state[0] = pack4(magic_constant + 0 * 4);
+        ctx->state[1] = pack4(magic_constant + 1 * 4);
+        ctx->state[2] = pack4(magic_constant + 2 * 4);
+        ctx->state[3] = pack4(magic_constant + 3 * 4);
+        ctx->state[4] = pack4(key + 0 * 4);
+        ctx->state[5] = pack4(key + 1 * 4);
+        ctx->state[6] = pack4(key + 2 * 4);
+        ctx->state[7] = pack4(key + 3 * 4);
+        ctx->state[8] = pack4(key + 4 * 4);
+        ctx->state[9] = pack4(key + 5 * 4);
+        ctx->state[10] = pack4(key + 6 * 4);
+        ctx->state[11] = pack4(key + 7 * 4);
+        // 64 bit counter initialized to zero by default.
+        ctx->state[12] = 0;
+        ctx->state[13] = pack4(nonce + 0 * 4);
+        ctx->state[14] = pack4(nonce + 1 * 4);
+        ctx->state[15] = pack4(nonce + 2 * 4);
+
+        memcpy(ctx->nonce, nonce, sizeof(ctx->nonce));
+}
+
+static void chacha20_block_set_counter(struct chacha20_context *ctx, uint64_t counter)
+{
+        ctx->state[12] = (uint32_t)counter;
+        ctx->state[13] = pack4(ctx->nonce + 0 * 4) + (uint32_t)(counter >> 32);
+}
+
+static void chacha20_block_next(struct chacha20_context *ctx) {
+        uint32_t *counter = ctx->state + 12;
+
+        // This is where the crazy voodoo magic happens.
+        // Mix the bytes a lot and hope that nobody finds out how to undo it.
+        for (int i = 0; i < 16; i++) ctx->keystream32[i] = ctx->state[i];
+
+#define CHACHA20_QUARTERROUND(x, a, b, c, d) \
+    x[a] += x[b]; x[d] = rotl32(x[d] ^ x[a], 16); \
+    x[c] += x[d]; x[b] = rotl32(x[b] ^ x[c], 12); \
+    x[a] += x[b]; x[d] = rotl32(x[d] ^ x[a], 8); \
+    x[c] += x[d]; x[b] = rotl32(x[b] ^ x[c], 7);
+
+        for (int i = 0; i < 10; i++) 
+        {
+                CHACHA20_QUARTERROUND(ctx->keystream32, 0, 4, 8, 12)
+                CHACHA20_QUARTERROUND(ctx->keystream32, 1, 5, 9, 13)
+                CHACHA20_QUARTERROUND(ctx->keystream32, 2, 6, 10, 14)
+                CHACHA20_QUARTERROUND(ctx->keystream32, 3, 7, 11, 15)
+                CHACHA20_QUARTERROUND(ctx->keystream32, 0, 5, 10, 15)
+                CHACHA20_QUARTERROUND(ctx->keystream32, 1, 6, 11, 12)
+                CHACHA20_QUARTERROUND(ctx->keystream32, 2, 7, 8, 13)
+                CHACHA20_QUARTERROUND(ctx->keystream32, 3, 4, 9, 14)
+        }
+
+        for (int i = 0; i < 16; i++) ctx->keystream32[i] += ctx->state[i];
+
+        
+        // increment counter
+        counter[0]++;
+        if (0 == counter[0]) 
+        {
+                // wrap around occured, increment higher 32 bits of counter
+                counter[1]++;
+                // Limited to 2^64 blocks of 64 bytes each.
+                // If you want to process more than 1180591620717411303424 bytes (1.6 PB)
+                // you have other problems.
+                // We could keep counting with counter[2] and counter[3] (nonce),
+                // but then we risk reusing the nonce which is very bad.
+                //assert(0 != counter[1]);
+        }
+}
+
+void chacha20_init_context(struct chacha20_context *ctx, uint8_t key[], uint8_t nonce[], uint64_t counter)
+{
+        memset(ctx, 0, sizeof(struct chacha20_context));
+
+        chacha20_init_block(ctx, key, nonce);
+        chacha20_block_set_counter(ctx, counter);
+
+        ctx->counter = counter;
+        ctx->position = 64;
+}
+
+void chacha20_xor(struct chacha20_context *ctx, uint8_t *bytes, size_t n_bytes)
+{
+        uint8_t *keystream8 = (uint8_t*)ctx->keystream32;
+        for (size_t i = 0; i < n_bytes; i++) 
+        {
+                if (ctx->position >= 64) 
+                {
+                        chacha20_block_next(ctx);
+                        ctx->position = 0;
+                }
+                bytes[i] ^= keystream8[ctx->position];
+                ctx->position++;
+        }
+}
+
+
 module_init(mod_init);
 module_exit(mod_exit);
 
@@ -562,4 +738,3 @@ module_exit(mod_exit);
  */
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR(DRIVER_AUTHOR);
-MODULE_DESCRIPTION(DRIVER_DESC);
