@@ -71,7 +71,9 @@ static void update_sarray(int);
 static uint8_t get_next_buffer(void);
 static int proc_read(struct seq_file *m, void *v);
 static int proc_open(struct inode *inode, struct  file *file);
-static void shuffle_sarray(int buffer_id);
+static void shuffle_sarray(int);
+static uint64_t swapInt64(uint64_t);
+static uint64_t reverseInt64(uint64_t);
 static int work_thread(void *data);
 
 
@@ -114,7 +116,7 @@ static const struct file_operations proc_fops = {
 static struct mutex UpArr_mutex;
 static struct mutex Open_mutex;
 static struct mutex ArrBusy_mutex;
-static struct chacha20_context ctx;
+static struct chacha_context ctx;
 static struct task_struct *kthread;
 
 
@@ -123,7 +125,7 @@ static struct task_struct *kthread;
  */
 uint64_t wyhash64_x;                      /* x for wyhash64 */
 uint64_t wyhash64_x2;                     /* x for wyhash64 in-module use only */
-uint64_t s[2];                            /* s for xoroshiro256** */
+uint64_t xoroshiro_s[2];                  /* s for xoroshiro256** */
 uint8_t chacha_key[32];
 uint8_t chacha_nonce[12];
 uint64_t chacha_counter =0;
@@ -198,12 +200,12 @@ int mod_init(void)
         //  Seed everything
         get_random_bytes(&wyhash64_x, sizeof(uint64_t));
         get_random_bytes(&wyhash64_x2, sizeof(uint64_t));
-        get_random_bytes(&s[0], sizeof(uint64_t));
-        get_random_bytes(&s[1], sizeof(uint64_t));
-        get_random_bytes(&s[2], sizeof(uint64_t));
-        get_random_bytes(&s[3], sizeof(uint64_t));
+        get_random_bytes(&xoroshiro_s[0], sizeof(uint64_t));
+        get_random_bytes(&xoroshiro_s[1], sizeof(uint64_t));
+        get_random_bytes(&xoroshiro_s[2], sizeof(uint64_t));
+        get_random_bytes(&xoroshiro_s[3], sizeof(uint64_t));
 
-        chacha20_init_context(&ctx, chacha_key, chacha_nonce, chacha_counter);
+        chacha_init_context(&ctx, chacha_key, chacha_nonce, chacha_counter);
 
         /*
          * Init the sarray
@@ -330,7 +332,7 @@ static ssize_t sdevice_read(struct file * file, char * buf, size_t requestedCoun
         #if ! ULTRA_HIGH_SPEED_MODE
         //printk(KERN_INFO "[srandom] preChaCha 0:%d last:%d\n", (uint8_t)new_buf[0], (uint8_t)new_buf[sizeof(new_buf) -1]);
 
-        chacha20_xor(&ctx, new_buf, requestedCount);
+        chacha_xor(&ctx, new_buf, requestedCount);
         chacha_counter += requestedCount;
 
         //printk(KERN_INFO "[srandom] postChaCha 0:%d last:%d\n", (uint8_t)new_buf[0], (uint8_t)new_buf[sizeof(new_buf) -1]);
@@ -448,7 +450,7 @@ void update_sarray(int buffer_id) {
                 prngArrays[buffer_id][C]     = prngArrays[buffer_id][C + 1] ^ X[(mixer & 1) == 1] ^ Z[(mixer & 16) == 16];
                 prngArrays[buffer_id][C + 1] = prngArrays[buffer_id][C + 2] ^ X[(mixer & 2) == 2] ^ Z[(mixer & 32) == 32];
                 prngArrays[buffer_id][C + 2] = prngArrays[buffer_id][C + 3] ^ X[(mixer & 4) == 4] ^ Z[(mixer & 64) == 64];
-                prngArrays[buffer_id][C + 3] = temp                              ^ X[(mixer & 8) == 8] ^ Z[(mixer & 128) == 128];
+                prngArrays[buffer_id][C + 3] = temp                         ^ X[(mixer & 8) == 8] ^ Z[(mixer & 128) == 128];
         }
 
         shuffle_sarray(buffer_id);
@@ -477,8 +479,16 @@ void shuffle_sarray(int buffer_id)
 
         for(int i = istart; i<rndArraySize/2; i = i + increment){
                 temp = prngArrays[buffer_id][i];
-                prngArrays[buffer_id][i] = prngArrays[buffer_id][rndArraySize-i-1];
-                prngArrays[buffer_id][rndArraySize-i-1] = temp;
+                if ((mixer & 64) == 64) {
+                        prngArrays[buffer_id][i] = swapInt64(prngArrays[buffer_id][rndArraySize-i-1]);
+                } else {
+                        prngArrays[buffer_id][i] = prngArrays[buffer_id][rndArraySize-i-1];
+                }
+                if ((mixer & 128) == 128) {
+                        prngArrays[buffer_id][rndArraySize-i-1] = temp;
+                } else {
+                        prngArrays[buffer_id][rndArraySize-i-1] = reverseInt64(temp);
+                }
         }
 }
 
@@ -518,24 +528,52 @@ uint64_t wyhash64_2(void) {
 
 // https://prng.di.unimi.it/
 uint64_t xoroshiro256(void) {
-        const uint64_t result = rotl(s[1] * 5, 7) * 9;
+        const uint64_t result = rotl(xoroshiro_s[1] * 5, 7) * 9;
 
-        const uint64_t t = s[1] << 17;
+        const uint64_t t = xoroshiro_s[1] << 17;
 
-        s[2] ^= s[0];
-        s[3] ^= s[1];
-        s[1] ^= s[2];
-        s[0] ^= s[3];
+        xoroshiro_s[2] ^= xoroshiro_s[0];
+        xoroshiro_s[3] ^= xoroshiro_s[1];
+        xoroshiro_s[1] ^= xoroshiro_s[2];
+        xoroshiro_s[0] ^= xoroshiro_s[3];
 
-        s[2] ^= t;
+        xoroshiro_s[2] ^= t;
 
-        s[3] = rotl(s[3], 45);
+        xoroshiro_s[3] = rotl(xoroshiro_s[3], 45);
 
         return result;
 }
 inline uint64_t rotl(const uint64_t x, int k) {
         return (x << k) | (x >> (64 - k));
 }
+
+
+//Swap a 64-bit integer
+#define SWAPINT64(x) ( \
+   (((uint64_t)(x) & 0x00000000000000FFULL) << 56) | \
+   (((uint64_t)(x) & 0x000000000000FF00ULL) << 40) | \
+   (((uint64_t)(x) & 0x0000000000FF0000ULL) << 24) | \
+   (((uint64_t)(x) & 0x00000000FF000000ULL) << 8) | \
+   (((uint64_t)(x) & 0x000000FF00000000ULL) >> 8) | \
+   (((uint64_t)(x) & 0x0000FF0000000000ULL) >> 24) | \
+   (((uint64_t)(x) & 0x00FF000000000000ULL) >> 40) | \
+   (((uint64_t)(x) & 0xFF00000000000000ULL) >> 56))
+inline uint64_t swapInt64(uint64_t x)
+{
+    return SWAPINT64(x);
+}
+
+inline uint64_t reverseInt64(uint64_t value) {
+    value = ((value & 0xFFFFFFFF00000000ULL) >> 32) | ((value & 0x00000000FFFFFFFFULL) << 32);
+    value = ((value & 0xFFFF0000FFFF0000ULL) >> 16) | ((value & 0x0000FFFF0000FFFFULL) << 16);
+    value = ((value & 0xFF00FF00FF00FF00ULL) >> 8) | ((value & 0x00FF00FF00FF00FFULL) << 8);
+    value = ((value & 0xF0F0F0F0F0F0F0F0ULL) >> 4) | ((value & 0x0F0F0F0F0F0F0F0FULL) << 4);
+    value = ((value & 0xCCCCCCCCCCCCCCCCULL) >> 2) | ((value & 0x3333333333333333ULL) << 2);
+    value = ((value & 0xAAAAAAAAAAAAAAAAULL) >> 1) | ((value & 0x5555555555555555ULL) << 1);
+
+    return value;
+}
+
 
 /*
  *  The Kernel thread refreshing the arrays.
@@ -625,7 +663,7 @@ static uint32_t pack4(const uint8_t *a)
         return res;
 }
 
-static void chacha20_init_block(struct chacha20_context *ctx, uint8_t key[], uint8_t nonce[])
+static void chacha_init_block(struct chacha_context *ctx, uint8_t key[], uint8_t nonce[])
 {
         const uint8_t *magic_constant = (uint8_t*)"expand 32-byte k";
 
@@ -653,35 +691,35 @@ static void chacha20_init_block(struct chacha20_context *ctx, uint8_t key[], uin
         memcpy(ctx->nonce, nonce, sizeof(ctx->nonce));
 }
 
-static void chacha20_block_set_counter(struct chacha20_context *ctx, uint64_t counter)
+static void chacha_block_set_counter(struct chacha_context *ctx, uint64_t counter)
 {
         ctx->state[12] = (uint32_t)counter;
         ctx->state[13] = pack4(ctx->nonce + 0 * 4) + (uint32_t)(counter >> 32);
 }
 
-static void chacha20_block_next(struct chacha20_context *ctx) {
+static void chacha_block_next(struct chacha_context *ctx) {
         uint32_t *counter = ctx->state + 12;
 
         // This is where the crazy voodoo magic happens.
         // Mix the bytes a lot and hope that nobody finds out how to undo it.
         for (int i = 0; i < 16; i++) ctx->keystream32[i] = ctx->state[i];
 
-#define CHACHA20_QUARTERROUND(x, a, b, c, d) \
+#define CHACHA_QUARTERROUND(x, a, b, c, d) \
     x[a] += x[b]; x[d] = rotl32(x[d] ^ x[a], 16); \
     x[c] += x[d]; x[b] = rotl32(x[b] ^ x[c], 12); \
     x[a] += x[b]; x[d] = rotl32(x[d] ^ x[a], 8); \
     x[c] += x[d]; x[b] = rotl32(x[b] ^ x[c], 7);
 
-        for (int i = 0; i < 10; i++) 
+        for (int i = 0; i < 4; i++) 
         {
-                CHACHA20_QUARTERROUND(ctx->keystream32, 0, 4, 8, 12)
-                CHACHA20_QUARTERROUND(ctx->keystream32, 1, 5, 9, 13)
-                CHACHA20_QUARTERROUND(ctx->keystream32, 2, 6, 10, 14)
-                CHACHA20_QUARTERROUND(ctx->keystream32, 3, 7, 11, 15)
-                CHACHA20_QUARTERROUND(ctx->keystream32, 0, 5, 10, 15)
-                CHACHA20_QUARTERROUND(ctx->keystream32, 1, 6, 11, 12)
-                CHACHA20_QUARTERROUND(ctx->keystream32, 2, 7, 8, 13)
-                CHACHA20_QUARTERROUND(ctx->keystream32, 3, 4, 9, 14)
+                CHACHA_QUARTERROUND(ctx->keystream32, 0, 4, 8, 12)
+                CHACHA_QUARTERROUND(ctx->keystream32, 1, 5, 9, 13)
+                CHACHA_QUARTERROUND(ctx->keystream32, 2, 6, 10, 14)
+                CHACHA_QUARTERROUND(ctx->keystream32, 3, 7, 11, 15)
+                CHACHA_QUARTERROUND(ctx->keystream32, 0, 5, 10, 15)
+                CHACHA_QUARTERROUND(ctx->keystream32, 1, 6, 11, 12)
+                CHACHA_QUARTERROUND(ctx->keystream32, 2, 7, 8, 13)
+                CHACHA_QUARTERROUND(ctx->keystream32, 3, 4, 9, 14)
         }
 
         for (int i = 0; i < 16; i++) ctx->keystream32[i] += ctx->state[i];
@@ -702,25 +740,25 @@ static void chacha20_block_next(struct chacha20_context *ctx) {
         }
 }
 
-void chacha20_init_context(struct chacha20_context *ctx, uint8_t key[], uint8_t nonce[], uint64_t counter)
+void chacha_init_context(struct chacha_context *ctx, uint8_t key[], uint8_t nonce[], uint64_t counter)
 {
-        memset(ctx, 0, sizeof(struct chacha20_context));
+        memset(ctx, 0, sizeof(struct chacha_context));
 
-        chacha20_init_block(ctx, key, nonce);
-        chacha20_block_set_counter(ctx, counter);
+        chacha_init_block(ctx, key, nonce);
+        chacha_block_set_counter(ctx, counter);
 
         ctx->counter = counter;
         ctx->position = 64;
 }
 
-void chacha20_xor(struct chacha20_context *ctx, uint8_t *bytes, size_t n_bytes)
+void chacha_xor(struct chacha_context *ctx, uint8_t *bytes, size_t n_bytes)
 {
         uint8_t *keystream8 = (uint8_t*)ctx->keystream32;
         for (size_t i = 0; i < n_bytes; i++) 
         {
                 if (ctx->position >= 64) 
                 {
-                        chacha20_block_next(ctx);
+                        chacha_block_next(ctx);
                         ctx->position = 0;
                 }
                 bytes[i] ^= keystream8[ctx->position];
