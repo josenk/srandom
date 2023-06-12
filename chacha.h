@@ -4,7 +4,7 @@
  * Adapted from Adapted from: https://github.com/Ginurx/chacha20-c
  */
 
-struct chacha20_context
+struct chacha_context
 {
 	uint32_t keystream32[16];
 	size_t position;
@@ -16,6 +16,6 @@ struct chacha20_context
 	uint32_t state[16];
 };
 
-void chacha20_init_context(struct chacha20_context *ctx, uint8_t key[], uint8_t nounc[], uint64_t counter);
+void chacha_init_context(struct chacha_context *ctx, uint8_t key[], uint8_t nounc[], uint64_t counter);
 
-void chacha20_xor(struct chacha20_context *ctx, uint8_t *bytes, size_t n_bytes);
+void chacha_xor(struct chacha_context *ctx, uint8_t *bytes, size_t n_bytes);

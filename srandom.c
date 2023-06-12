@@ -16,11 +16,11 @@
 
 #define DRIVER_AUTHOR "Jonathan Senkerik <josenk@jintegrate.co>"
 #define DRIVER_DESC   "Improved random number generator."
-#define ULTRA_HIGH_SPEED_MODE 0     /* Set to 1 to enable Ultra High Speed Mode (XorShift, which could be considered less random, but still passes dieharder */
+#define ULTRA_HIGH_SPEED_MODE 1     /* Set to 0 for Chacha8 mode, set to 1 to enable Ultra High Speed Mode (XorShift) */
 #define SDEVICE_NAME "srandom"      /* Dev name as it appears in /proc/devices */
 #define APP_VERSION "2.0.0"
 #define numberOfRndArrays  64       /* Number of 512b Array. do not change */
-#define rndArraySize 72             /* Size of Array.  Must be >= 65. */
+#define rndArraySize 67             /* Size of Array.  Must be >= 65. */
 #define THREAD_SLEEP_VALUE 601      /* Amount of time in seconds, the background thread should sleep between each operation. */
 #define PAID 0
 
@@ -125,7 +125,7 @@ static struct task_struct *kthread;
  */
 uint64_t wyhash64_x;                      /* x for wyhash64 */
 uint64_t wyhash64_x2;                     /* x for wyhash64 in-module use only */
-uint64_t xoroshiro_s[2];                  /* s for xoroshiro256** */
+uint64_t xoroshiro_s[4];                  /* s for xoroshiro256** */
 uint8_t chacha_key[32];
 uint8_t chacha_nonce[12];
 uint64_t chacha_counter =0;
@@ -389,7 +389,7 @@ static ssize_t sdevice_write(struct file *file, const char __user *buf, size_t r
         kfree(newdata);
 
         #ifdef DEBUG_WRITE
-        printk(KERN_INFO "[srandom] sdevice_write COPT_FROM_USER receivedCount:%zu \n", receivedCount);
+        printk(KERN_INFO "[srandom] sdevice_write COPY_FROM_USER receivedCount:%zu \n", receivedCount);
         #endif
 
         return receivedCount;
@@ -446,7 +446,7 @@ void update_sarray(int buffer_id) {
                 mixer = (uint8_t)wyhash64_2();
                 X[0]  = wyhash64();
                 X[1]  = wyhash64();
-                temp                              = prngArrays[buffer_id][C];
+                temp                         = prngArrays[buffer_id][C];
                 prngArrays[buffer_id][C]     = prngArrays[buffer_id][C + 1] ^ X[(mixer & 1) == 1] ^ Z[(mixer & 16) == 16];
                 prngArrays[buffer_id][C + 1] = prngArrays[buffer_id][C + 2] ^ X[(mixer & 2) == 2] ^ Z[(mixer & 32) == 32];
                 prngArrays[buffer_id][C + 2] = prngArrays[buffer_id][C + 3] ^ X[(mixer & 4) == 4] ^ Z[(mixer & 64) == 64];
@@ -466,19 +466,25 @@ void update_sarray(int buffer_id) {
 /*
  * Shuffle the sarray
  */
-void shuffle_sarray(int buffer_id)
+inline void shuffle_sarray(int buffer_id)
 {
         uint64_t temp;
-        uint8_t mixer = (uint8_t)wyhash64_2();
+        uint16_t mixer = (uint16_t)wyhash64_2();
+        uint8_t mixtype = (mixer & 448) >> 7;
         uint8_t istart = (mixer & 56) >> 4;
         uint8_t increment = (mixer & 3) + 1;
+        int i;
+        
 
         #ifdef DEBUG_SHUFFLE
         printk(KERN_INFO "[srandom] shuffle_sarray istart: %d, increment: %d, buffer_id:%d, first:%llu, last:%llu\n", istart, increment, buffer_id, prngArrays[buffer_id][0], prngArrays[buffer_id][rndArraySize-1]);
         #endif
 
-        for(int i = istart; i<rndArraySize/2; i = i + increment){
-                temp = prngArrays[buffer_id][i];
+
+
+        for(i = istart; i<rndArraySize/2; i = i + increment){
+            if (mixtype == 0) {
+                                temp = prngArrays[buffer_id][i];
                 if ((mixer & 64) == 64) {
                         prngArrays[buffer_id][i] = swapInt64(prngArrays[buffer_id][rndArraySize-i-1]);
                 } else {
@@ -489,6 +495,21 @@ void shuffle_sarray(int buffer_id)
                 } else {
                         prngArrays[buffer_id][rndArraySize-i-1] = reverseInt64(temp);
                 }
+
+            } else if (mixtype == 1) {
+                prngArrays[buffer_id][i] = ((prngArrays[buffer_id][i] & 0xFFFFFFFF00000000ULL) >> 32) | ((prngArrays[buffer_id][i] & 0x00000000FFFFFFFFULL) << 32);
+                prngArrays[buffer_id][rndArraySize-i-1] = ((prngArrays[buffer_id][rndArraySize-i-1] & 0xFFFFFFFF00000000ULL) >> 32) | ((prngArrays[buffer_id][rndArraySize-i-1] & 0x00000000FFFFFFFFULL) << 32);
+
+            } else if (mixtype == 2) {
+                prngArrays[buffer_id][i] = ((prngArrays[buffer_id][i] & 0xFFFF0000FFFF0000ULL) >> 16) | ((prngArrays[buffer_id][i] & 0x0000FFFF0000FFFFULL) << 16);
+                prngArrays[buffer_id][rndArraySize-i-1] = ((prngArrays[buffer_id][rndArraySize-i-1] & 0xFFFF0000FFFF0000ULL) >> 16) | ((prngArrays[buffer_id][rndArraySize-i-1] & 0x0000FFFF0000FFFFULL) << 16);
+
+            } else if (mixtype == 3) {
+                prngArrays[buffer_id][i] = ((prngArrays[buffer_id][i] & 0xFF00FF00FF00FF00ULL) >> 8) | ((prngArrays[buffer_id][i] & 0x00FF00FF00FF00FFULL) << 8);
+                prngArrays[buffer_id][rndArraySize-i-1] = ((prngArrays[buffer_id][rndArraySize-i-1] & 0xFF00FF00FF00FF00ULL) >> 8) | ((prngArrays[buffer_id][rndArraySize-i-1] & 0x00FF00FF00FF00FFULL) << 8);;
+                
+            }
+
         }
 }
 
@@ -699,10 +720,11 @@ static void chacha_block_set_counter(struct chacha_context *ctx, uint64_t counte
 
 static void chacha_block_next(struct chacha_context *ctx) {
         uint32_t *counter = ctx->state + 12;
+        int i;
 
         // This is where the crazy voodoo magic happens.
         // Mix the bytes a lot and hope that nobody finds out how to undo it.
-        for (int i = 0; i < 16; i++) ctx->keystream32[i] = ctx->state[i];
+        for (i = 0; i < 16; i++) ctx->keystream32[i] = ctx->state[i];
 
 #define CHACHA_QUARTERROUND(x, a, b, c, d) \
     x[a] += x[b]; x[d] = rotl32(x[d] ^ x[a], 16); \
@@ -710,7 +732,7 @@ static void chacha_block_next(struct chacha_context *ctx) {
     x[a] += x[b]; x[d] = rotl32(x[d] ^ x[a], 8); \
     x[c] += x[d]; x[b] = rotl32(x[b] ^ x[c], 7);
 
-        for (int i = 0; i < 4; i++) 
+        for (i = 0; i < 4; i++) 
         {
                 CHACHA_QUARTERROUND(ctx->keystream32, 0, 4, 8, 12)
                 CHACHA_QUARTERROUND(ctx->keystream32, 1, 5, 9, 13)
@@ -722,7 +744,7 @@ static void chacha_block_next(struct chacha_context *ctx) {
                 CHACHA_QUARTERROUND(ctx->keystream32, 3, 4, 9, 14)
         }
 
-        for (int i = 0; i < 16; i++) ctx->keystream32[i] += ctx->state[i];
+        for (i = 0; i < 16; i++) ctx->keystream32[i] += ctx->state[i];
 
         
         // increment counter
@@ -754,7 +776,8 @@ void chacha_init_context(struct chacha_context *ctx, uint8_t key[], uint8_t nonc
 void chacha_xor(struct chacha_context *ctx, uint8_t *bytes, size_t n_bytes)
 {
         uint8_t *keystream8 = (uint8_t*)ctx->keystream32;
-        for (size_t i = 0; i < n_bytes; i++) 
+        size_t i;
+        for (i = 0; i < n_bytes; i++) 
         {
                 if (ctx->position >= 64) 
                 {
