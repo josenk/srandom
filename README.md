@@ -2,9 +2,11 @@ Introduction
 ------------
 srandom is a Linux kernel module that can be used like the built-in /dev/urandom & /dev/random device files.  In the standard mode (ChaCha8) it is about 20%-40% faster than built-in urandom and should be secure enough for crypto.  In ultra high speed mode it is about 500% faster (5x faster) than the built-in urandom generator.  YMWV depending on hardware and software configuration.  It should compile and install on any Linux 3.17+ kernel.  Both ChaCha8 and (UHS)XorShift pass all the randomness tests using dieharder.
 
+Version 2.1.0 introduces some performance improvements including the upgraded Xoshiro256++ PRNG algorithm, per-buffer locking for better multi-core performance, atomic operations for reduced mutex overhead, and enhanced shuffle algorithms with 6 different mixing types.
+
 srandom was created as a performance improvement to the built-in PRNG /dev/urandom number generator.  I wanted a much faster random number generator to wipe ssd disks.  The UHS algorithm is many times faster than urandom, but still produces excellent random numbers that dieharder finds indistinguishable from true random numbers.  You can easily wipe multiple SSDs at the same time.
 
-The built-in __PRNG__ generators (/dev/random and /dev/urandom) uses Chacha20 and are technically not flawed.  They are just very slow when compared to srandom.  __/dev/random and /dev/urandom are BOTH PRNG generators.__  
+The built-in __PRNG__ generators (/dev/random and /dev/urandom) use Chacha20 and are technically not flawed.  They are just very slow when compared to srandom.  __/dev/random and /dev/urandom are BOTH PRNG generators.__  
   > https://www.2uo.de/myths-about-urandom/
   ```
   Truth is, when state-of-the-art hash algorithms are broken, or when state-of-the-art block ciphers are broken, it doesn't matter that you get “philosophically insecure” random numbers because of them. You've got nothing left to securely use them for anyway.
@@ -19,7 +21,7 @@ What makes srandom a great PRNG generator?
 
 Why do I need this?
 -------------------
- * Use standard mode (ChaCha8) for any security type applications that rely heavily on random numbers.  For example, Apache SSL (Secure Socket Level), PGP (Pretty Good Privacy), VPN (Virtual Private Networks).  All types of Encryption, Password seeds, Tokens would rely on a source of random numbers.  There is many examples at https://www.random.org/testimonials/.
+ * Use standard mode (ChaCha8) for any security type applications that rely heavily on random numbers.  For example, Apache SSL (Secure Socket Level), PGP (Pretty Good Privacy), VPN (Virtual Private Networks).  All types of Encryption, Password seeds, Tokens would rely on a source of random numbers.  There are many examples at https://www.random.org/testimonials/.
 
  * Use UHS for disk wiping or any application that does not involve crypto, or if you're not overly concerned about random numbers affecting security.
 
@@ -47,9 +49,94 @@ To uninstall the kernel module from your system.
     make uninstall
 
 
+Kernel Module Signing (Required for Secure Boot)
+------------------------------------------------
+If your system has Secure Boot enabled or kernel module signature verification enforced, you'll need to sign the module before loading it. The build process automatically detects if signing is required and attempts to sign the module.
+
+### Automatic Signing
+The Makefile will automatically attempt to sign the module during `make` if it detects that your kernel requires signed modules. It looks for existing signing keys in common locations.
+
+### Generate New Signing Keys
+If no signing keys are found, generate new ones:
+
+    make generate-keys
+
+This creates signing keys in `/usr/src/kernel-keys/` and generates both PEM and DER certificate formats.
+
+### Loading Signed Modules
+After building and signing, load the module normally:
+
+    make load
+
+If the load fails due to signature issues, the Makefile will provide specific solutions based on your system configuration.
+
+### Secure Boot Systems
+For systems with Secure Boot enabled, you have several options:
+
+1. **Import to Machine Owner Key (MOK) database** (recommended):
+   ```
+   make mok-import
+   ```
+   Then reboot and enroll the key when prompted by the MOK manager.
+
+2. **Import to kernel keyring**:
+   ```
+   make import-key
+   ```
+
+3. **Temporarily disable signature enforcement**:
+   ```
+   sudo sysctl kernel.module_sig_enforce=0
+   make load
+   ```
+
+### Troubleshooting Signature Issues
+- Check if signature verification failed: `dmesg | tail -10`
+- Force load (bypasses signature check): `make force-load`
+- Verify keys exist: `ls -la /usr/src/kernel-keys/`
+
+Note: All signing operations require root privileges. Use `sudo make` when building on systems with signing enforcement.
+
+
+Technical Details
+-----------------
+
+### PRNG Algorithms
+
+**srandom v2.1.0** uses a combination of high-quality PRNG algorithms:
+
+- **wyhash64**: Fast 64-bit PRNG using 128-bit multiplication, passes BigCrush tests
+- **Xoshiro256++**: State-of-the-art 256-bit state PRNG from prng.di.unimi.it, successor to xoroshiro with improved performance
+- **LCG Fast**: Linear congruential generator for internal high-speed operations
+- **ChaCha8**: Stream cipher used for additional entropy mixing in standard mode
+
+### Enhanced Shuffle Algorithm
+
+The array shuffling system now includes **6 different mixing types** for maximum entropy:
+
+0. **Element swapping** with optional byte swapping and bit reversal
+1. **32-bit word swapping** within 64-bit values  
+2. **16-bit word swapping** for finer granularity
+3. **8-bit byte swapping** for maximum bit diffusion
+4. **Rotation-based mixing** using left/right bit rotations (NEW)
+5. **XOR with rotated values** creating non-linear dependencies (NEW)
+
+Each shuffle operation randomly selects one of these 6 methods, ensuring unpredictable mixing patterns.
+
+### Performance Optimizations (v2.1.0)
+
+**Per-Buffer Locking**: Replaced global mutex with per-buffer mutexes, allowing parallel updates of different random number buffers on multi-core systems.
+
+**Atomic Operations**: Eliminated mutex overhead for simple counters (open counts) by using atomic operations, reducing lock contention.
+
+**Optimized Algorithms**: Upgraded from xoroshiro256** to Xoshiro256++ for better performance while maintaining excellent statistical quality.
+
+These optimizations improve performance on multi-core systems and reduce lock contention bottlenecks.
+
+
 Ultra High Speed Mode
 ---------------------
-This mode uses the two 64bit XorShift PRNGs.  This mode performs much faster than ChaCha8, but still passes dieharder tests.  To enable this mode, set the following line in the source code before running make.
+This mode uses the optimized Xoshiro256++ and wyhash64 PRNGs with enhanced shuffle algorithms.  This mode performs much faster than ChaCha8, but still passes dieharder tests.  To enable this mode, set the following line in the source code before running make.
 ```
 #define ULTRA_HIGH_SPEED_MODE 1
 ```
@@ -57,16 +144,16 @@ This mode uses the two 64bit XorShift PRNGs.  This mode performs much faster tha
 
 Usage
 -----
-You can load the kernel module temporary, or you can install the kernel module to be persistent on reboot.
+You can load the kernel module temporarily, or you can install the kernel module to be persistent on reboot.
 
   * If you want to just test the kernel module, you should run "make load".  This will load the kernel module into the running kernel and create a /dev/srandom accessible to root only.   It can be removed with "make unload".   You can monitor the load process in /var/log/messages.
-  * When you run "make install", the srandom kernel module is moved to /usr/lib/modules/.../kernel/drivers/.  If you run "make load" or reboot, the kernel module will be loaded into the running kernel, but now will replace the /dev/urandom device file.  The old /dev/urandom device is renamed (keeping it's inode number).  This allows any running process that had /dev/urandom to continue running without issues. All new requests for /dev/urandom will use the srandom kernel module.
+  * When you run "make install", the srandom kernel module is moved to /usr/lib/modules/.../kernel/drivers/.  If you run "make load" or reboot, the kernel module will be loaded into the running kernel, but now will replace the /dev/urandom device file.  The old /dev/urandom device is renamed (keeping its inode number).  This allows any running process that had /dev/urandom to continue running without issues. All new requests for /dev/urandom will use the srandom kernel module.
   * Once the kernel module is loaded, you can access the module information through the /proc filesystem. For example:
 ```
 # cat /proc/srandom
 -----------------------:----------------------
 Device                 : /dev/srandom
-Module version         : 2.0.0 UHS (XorShift)
+Module version         : 2.1.0 UHS (XorShift)
 Current open count     : 3
 Total open count       : 42
 Total K bytes          : 38030518
@@ -82,11 +169,11 @@ github                 : https://github.com/josenk/srandom
 
 # /usr/bin/srandom status
 Module loaded
-srandom if functioning correctly
+srandom is functioning correctly
 /dev/urandom is LINKED to /dev/srandom (system is using srandom)
 
 ```
-  * To completely remove the srandom module, use "make uninstall".   Depending if there is processes accessing /dev/srandom, you may not be able to remove the module from the running kernel.   Try "make unload", if the module is busy, then a reboot is required.
+  * To completely remove the srandom module, use "make uninstall".   Depending if there are processes accessing /dev/srandom, you may not be able to remove the module from the running kernel.   Try "make unload", if the module is busy, then a reboot is required.
 
 
 Testing & performance
@@ -94,7 +181,7 @@ Testing & performance
 A simple dd command to read from the /dev/srandom device will show performance of the generator.  The results below are typical from my system.  Of course, your performance will vary.
 
 
-The "UHS" srandom number generator
+The srandom number generator
 
 ```
 time dd if=/dev/srandom of=/dev/null count=64k bs=64k
@@ -108,7 +195,7 @@ sys     0m1.866s
 ```
 
 
-The built-in urandom number generator
+The built-in urandom number generator (use /dev/urandom.orig if you did make install)
 
 ```
 time dd if=/dev/urandom of=/dev/null count=64k bs=64k
@@ -124,9 +211,9 @@ sys     0m9.680s
 
 Testing randomness
 ------------------
-The most important part of the random number device file is that is produces random/unpredictable numbers.  The golden standard of testing randomness is the dieharder test suite (http://www.phy.duke.edu/~rgb/General/dieharder.php).  The dieharder tool will easily detect flawed random number generators.   After you install dieharder, use the following command to put /dev/srandom through the battery of tests.
+The most important part of the random number device file is that it produces random/unpredictable numbers.  The golden standard of testing randomness is the dieharder test suite (http://www.phy.duke.edu/~rgb/General/dieharder.php).  The dieharder tool will easily detect flawed random number generators.   After you install dieharder, use the following command to put /dev/srandom through the battery of tests.
 
-A note about the possibility of a test showing as "WEAK"...  If a test is repeatedly "FAILED" or "WEAK", then that is a problem.   
+NOTE: Being random includes the possibility of a test showing as "WEAK" or "FAILED"...  ie. If there's 0 percent chance a test could fail, that means it's not completely random.  With that in mind, if a test is repeatedly "FAILED" or "WEAK", then that is a problem, if it happened only once its OK/GOOD.
 
 
 ```
@@ -168,9 +255,9 @@ diehard_count_1s_byt|   0|    256000|     100|0.18753110|  PASSED
 
 
 
-How to configure your apps
---------------------------
-  If you installed the kernel module to load on reboot, then you do not need to modify any applications to use the srandom kernel module.   It will be linked to /dev/urandom, so all applications will use it automatically.   However, if you do not want to link /dev/srandom to /dev/urandom, then you can configure your applications to use which ever device you want.   Here is a few examples....
+How to manually configure your apps
+-----------------------------------
+  If you installed the kernel module to load on reboot, then you do not need to modify any applications to use the srandom kernel module.   It will be linked to /dev/urandom, so all applications will use it automatically.   However, if you do not want to link /dev/srandom to /dev/urandom, then you can configure your applications to use whichever device you want.   Here are a few examples....
 
   Java:  Use the following command line argument to tell Java to use the new random device
 
@@ -208,7 +295,7 @@ How to configure your apps
 
 
 Using /dev/srandom to wipe all data from your SSD disks.
------------------------------------------------
+--------------------------------------------------------
 *** This will DESTROY DATA!   Use with caution! ***
 
 *** Replace /dev/sdXX with your disk device you want to wipe.
